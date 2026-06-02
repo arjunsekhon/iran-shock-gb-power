@@ -70,3 +70,38 @@ CODE_COLUMNS = [
     "EventBaseCode",
     "EventRootCode",
 ]  # zero-leading -> read as strings
+
+
+# GDELT GKG v2 — 27 columns in order.
+# Note: GDELT field 2 is "DATE" but DuckDB treats `date` as a reserved type
+# keyword, so we rename to `gkg_datestamp` for safe SQL usage.
+GKG_COLUMNS = [
+    "GKGRECORDID",
+    "gkg_datestamp",
+    "SourceCollectionIdentifier",
+    "SourceCommonName",
+    "DocumentIdentifier",  # the article URL
+    "V1Counts",
+    "V21Counts",
+    "V1Themes",  # we filter at ingest on this (V1 themes, simpler list)
+    "V2EnhancedThemes",  # richer, includes character offsets
+    "V1Locations",
+    "V2EnhancedLocations",  # full lat/lon + FIPS codes
+    "V1Persons",
+    "V2EnhancedPersons",
+    "V1Organizations",
+    "V2EnhancedOrganizations",
+    "V2Tone",  # 6-part: tone,positive,negative,polarity,activity,self,wordcount
+    "V2EnhancedDates",
+    "V21GCAM",  # ~2,300 dimensions: c2.1:25,c2.10:29,...
+    "V21SharingImage",
+    "V21RelatedImages",
+    "V21SocialImageEmbeds",
+    "V21SocialVideoEmbeds",
+    "V21Quotations",
+    "V21AllNames",
+    "V21Amounts",
+    "V21TranslationInfo",
+    "V2ExtrasXML",
+]
+assert len(GKG_COLUMNS) == 27

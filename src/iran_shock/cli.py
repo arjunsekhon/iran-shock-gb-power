@@ -6,7 +6,7 @@ Three-stage pipeline, each stage a CLI:
 
     iran-shock-ingest-prices   Fetches Brent, GB MID, TTF, gb_gen_mix; writes data/raw/prices/*.csv
     iran-shock-ingest-gdelt    Downloads GDELT files; writes data/raw/gdelt/date=…/
-    iran-shock-build           Loads raw -> DuckDB; materialises 10 SQL views
+    iran-shock-build           Loads raw -> DuckDB; materialises 16 SQL views
 
     notebooks/06_dashboard.ipynb  Pure read-only analysis on top of the built DuckDB.
 
@@ -29,7 +29,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from iran_shock.columns import EVENT_COLUMNS
+from iran_shock.columns import EVENT_COLUMNS, GKG_COLUMNS
 from iran_shock.config import (
     DUCKDB_PATH,
     EXPORT_DIR,
@@ -38,8 +38,14 @@ from iran_shock.config import (
     WINDOW_END,
     WINDOW_START,
 )
-from iran_shock.gdelt import build_export_urls, download_all
-from iran_shock.prices import fetch_brent, fetch_gb_gen_mix, fetch_gb_power, fetch_ttf_gas
+from iran_shock.gdelt import build_export_urls, build_gkg_urls, download_all, download_all_gkg
+from iran_shock.prices import (
+    fetch_brent,
+    fetch_gb_gen_mix,
+    fetch_gb_power,
+    fetch_ttf_gas,
+    fetch_uka_proxy,
+)
 
 log = logging.getLogger("iran_shock.ingest")
 
@@ -114,6 +120,55 @@ def ingest_gdelt() -> int:
     return 0 if n_failed == 0 else 1
 
 
+def ingest_gdelt_gkg() -> int:
+    """Download GDELT GKG files with filter-at-ingest.
+
+    Pulls config.GKG_SAMPLE_MINUTES-cadence GKG files between WINDOW_START and
+    WINDOW_END, keeps only rows whose V2THEMES contains at least one of
+    config.GKG_THEME_FILTER tokens. Idempotent and resumable; safe to re-run.
+    """
+    from iran_shock.config import GKG_RAW_DIR, GKG_SAMPLE_MINUTES, GKG_THEME_FILTER
+
+    log_path = Path("logs/ingest_gdelt_gkg.log")
+    _configure_logging(log_path)
+
+    log.info(
+        "GKG ingest started; window %s -> %s, sample=%dmin, themes=%d",
+        WINDOW_START,
+        WINDOW_END,
+        GKG_SAMPLE_MINUTES,
+        len(GKG_THEME_FILTER),
+    )
+    urls = build_gkg_urls(WINDOW_START, WINDOW_END, GKG_SAMPLE_MINUTES)
+    log.info("%d GKG files to consider (already-present skipped)", len(urls))
+
+    n_ok, n_404, n_failed, failures = download_all_gkg(urls, GKG_RAW_DIR, theme_filter=GKG_THEME_FILTER)
+    log.info("download done: ok=%d  404=%d  failed=%d", n_ok, n_404, n_failed)
+    for url, err in failures[:10]:
+        log.warning("failed: %s -> %s", url, err)
+    log.info("log file: %s", log_path)
+    return 0 if n_failed == 0 else 1
+
+
+def score_finbert() -> int:
+    """Score with FinBERT — the SOURCEURL slugs of event-window articles.
+
+    Idempotent — re-running skips already-scored URLs. Loads the model on first
+    run (~440MB download), then runs CPU inference at ~25-50 sentences/sec.
+    """
+    log_path = Path("logs/score_finbert.log")
+    _configure_logging(log_path)
+
+    from iran_shock.finbert import score_event_day_urls
+
+    log.info("connecting to %s for URL collection", DUCKDB_PATH)
+    con = duckdb.connect(DUCKDB_PATH, read_only=True)
+    out = score_event_day_urls(con)
+    log.info("FinBERT scoring complete; output at %s", out)
+    log.info("log file: %s", log_path)
+    return 0
+
+
 def ingest_prices() -> int:
     """Fetch Brent, GB power MID (APX), and TTF gas; write CSVs + per-source metrics."""
     log_path = Path("logs/ingest_prices.log")
@@ -127,6 +182,7 @@ def ingest_prices() -> int:
         ("gb_power", fetch_gb_power),
         ("ttf", fetch_ttf_gas),
         ("gb_gen_mix", fetch_gb_gen_mix),
+        ("uka_proxy", fetch_uka_proxy),
     ]
 
     metrics_rows = []
@@ -163,7 +219,7 @@ def build() -> int:
     Run after `iran-shock-ingest-prices` and `iran-shock-ingest-gdelt`. Reads from
     data/epic_fury_timeline.csv, data/raw/prices/*.csv, and data/raw/gdelt/**/*.export.CSV;
     executes each sql/v_*.sql file in dependency order; produces a populated
-    DuckDB at config.DUCKDB_PATH with 6 tables and 10 views.
+    DuckDB at config.DUCKDB_PATH with 7 tables and 16 views.
     """
     log_path = Path("logs/build.log")
     _configure_logging(log_path)
@@ -179,7 +235,7 @@ def build() -> int:
     """)
 
     log.info("loading price tables from data/raw/prices/")
-    for name in ("brent", "gb_power", "ttf", "gb_gen_mix"):
+    for name in ("brent", "gb_power", "ttf", "gb_gen_mix", "uka_proxy"):
         path = f"data/raw/prices/{name}.csv"
         if not Path(path).exists():
             log.error("missing %s — run `uv run iran-shock-ingest-prices` first", path)
@@ -199,6 +255,32 @@ def build() -> int:
             delim='\t', header=false, names={names}, all_varchar=true)
     """)
 
+    # ---- GDELT GKG — optional; load if present ----
+    from iran_shock.config import GKG_RAW_DIR
+
+    if any(Path(GKG_RAW_DIR).glob("date=*/*.gkg.csv")):
+        log.info("loading gdelt_gkg from %s/**/*.gkg.csv (all VARCHAR)", GKG_RAW_DIR)
+        gkg_names = [c.lower() for c in GKG_COLUMNS]
+        con.execute(f"""
+            CREATE OR REPLACE TABLE gdelt_gkg AS
+            SELECT * FROM read_csv('{GKG_RAW_DIR}/**/*.gkg.csv',
+                delim='\t', header=false, names={gkg_names}, all_varchar=true,
+                ignore_errors=true)
+        """)
+    else:
+        log.info("no gdelt_gkg files under %s — GKG views will be skipped", GKG_RAW_DIR)
+
+    # ---- FinBERT headline scores — optional ----
+    finbert_path = Path("data/raw/finbert/headline_scores.csv")
+    if finbert_path.exists():
+        log.info("loading finbert_scores from %s", finbert_path)
+        con.execute(
+            f"CREATE OR REPLACE TABLE finbert_scores AS "
+            f"SELECT * FROM read_csv('{finbert_path}', header=true, all_varchar=false)"
+        )
+    else:
+        log.info("no finbert_scores at %s — v_finbert_daily view will be skipped", finbert_path)
+
     # ---- views from sql/, in dependency order ----
     view_files = [
         "v_middle_east_events.sql",  # depends on gdelt
@@ -211,7 +293,35 @@ def build() -> int:
         "v_event_impact.sql",  # depends on timeline + price views (Brent-anchored t/t+3)
         "v_event_impact_multi.sql",  # multi-horizon (t+1, t+3, t+5, t+10)
         "v_event_impact_regime.sql",  # gas-share regime split (conditional-transmission test)
+        "v_news_burst_daily.sql",  # Hawkes-inspired burst score
+        "v_gdelt_tone_asymmetry_daily.sql",  # TGARCH-inspired tone split
+        "v_event_impact_multi_phase.sql",  # phase-aware multi-horizon split
+        "v_uka_proxy_daily.sql",  # UKA proxy daily series (KRBN-anchored)
+        "v_clean_spark_spread_daily.sql",  # theoretical CCGT margin + observed power
+        "v_css_regime_event_impact.sql",  # per-event CSS residual by gas regime
+        "v_gdelt_events_features_daily.sql",  # Goldstein × NumMentions, QuadClass, EventRootCode
+        "v_implied_ttf_daily.sql",  # implied TTF / basis (inverse CSS)
     ]
+    # GKG views — applied only if gdelt_gkg table exists.
+    gkg_view_files = [
+        "v_gkg_tone_daily.sql",  # 6-part tone vector + dispersion
+        "v_gdelt_gkg_themes_daily.sql",  # energy/maritime/conflict theme counts
+        "v_gdelt_gkg_hormuz_daily.sql",  # Hormuz / Persian Gulf / Kharg / Ras Laffan mentions
+        "v_gdelt_gkg_gcam_daily.sql",  # cherry-picked GCAM emotion dimensions
+    ]
+    has_gkg = (
+        con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'gdelt_gkg'"
+        ).fetchone()[0]
+        > 0
+    )
+    finbert_view_files = ["v_finbert_daily.sql"]  # FinBERT daily
+    has_finbert = (
+        con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'finbert_scores'"
+        ).fetchone()[0]
+        > 0
+    )
     for vfile in view_files:
         path = Path("sql") / vfile
         if not path.exists():
@@ -219,6 +329,25 @@ def build() -> int:
             return 1
         log.info("applying %s", path)
         con.execute(path.read_text())
+
+    if has_gkg:
+        for vfile in gkg_view_files:
+            path = Path("sql") / vfile
+            if not path.exists():
+                log.error("missing %s", path)
+                return 1
+            log.info("applying %s (GKG)", path)
+            con.execute(path.read_text())
+    else:
+        log.info("gdelt_gkg table absent; skipping %d GKG views", len(gkg_view_files))
+
+    if has_finbert:
+        for vfile in finbert_view_files:
+            path = Path("sql") / vfile
+            log.info("applying %s (FinBERT)", path)
+            con.execute(path.read_text())
+    else:
+        log.info("finbert_scores table absent; skipping v_finbert_daily")
 
     # ---- sanity sweep ----
     log.info("sanity sweep:")
@@ -229,6 +358,7 @@ def build() -> int:
         "gb_power",
         "ttf",
         "gb_gen_mix",
+        "uka_proxy",
         "gdelt",
         "v_middle_east_events",
         "v_event_geo",
@@ -240,7 +370,25 @@ def build() -> int:
         "v_event_impact",
         "v_event_impact_multi",
         "v_event_impact_regime",
-    ]:
+        "v_news_burst_daily",
+        "v_gdelt_tone_asymmetry_daily",
+        "v_event_impact_multi_phase",
+        "v_uka_proxy_daily",
+        "v_clean_spark_spread_daily",
+        "v_css_regime_event_impact",
+        "v_gdelt_events_features_daily",
+        "v_implied_ttf_daily",
+    ] + (
+        [
+            "gdelt_gkg",
+            "v_gkg_tone_daily",
+            "v_gdelt_gkg_themes_daily",
+            "v_gdelt_gkg_hormuz_daily",
+            "v_gdelt_gkg_gcam_daily",
+        ]
+        if has_gkg
+        else []
+    ) + (["finbert_scores", "v_finbert_daily"] if has_finbert else []):
         try:
             n = con.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
             log.info("  %-25s %10s rows", name, f"{n:,}")

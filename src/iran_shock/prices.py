@@ -2,6 +2,12 @@ import pandas as pd
 import requests
 import yfinance as yf
 
+from iran_shock.config import (
+    UKA_BASE_DATE,
+    UKA_BASE_PRICE_GBP_PER_TCO2,
+    UKA_PROXY_TICKER,
+)
+
 
 def fetch_brent(start="2026-01-01", end="2026-06-01"):
     # If yfinance starts returning 401/empty, Yahoo has tightened bot detection.
@@ -124,6 +130,61 @@ def fetch_gb_gen_mix(start="2026-01-01", end="2026-05-31", *, chunk_days=7):
     ]
 
 
+def fetch_uka_proxy(
+    start="2026-01-01",
+    end="2026-06-01",
+    *,
+    ticker=UKA_PROXY_TICKER,
+    base_price_gbp_per_tco2=UKA_BASE_PRICE_GBP_PER_TCO2,
+    base_date=UKA_BASE_DATE,
+):
+    """UK Allowance (UKA) proxy via KraneShares Global Carbon Strategy ETF (KRBN).
+
+    Why a proxy: ICE-direct UKA futures need a paid ICE subscription. EEX publishes
+    EUA daily settlement free but the download URL is fragile to scrape. KRBN
+    (NYSEARCA) tracks a basket of ICE carbon futures dominated by EUA (~60%) plus
+    RGGI, CCA, and UK ETS — for *relative* daily moves over a 5-month event-study
+    window, the KRBN signal is a defensible UKA proxy. Absolute level is anchored
+    on a documented base UKA price.
+
+    Conversion:
+        uka_proxy_gbp[t] = base_price_gbp_per_tco2 * (krbn[t] / krbn[base_date])
+
+    Constants live in `config.py` (UKA_BASE_PRICE_GBP_PER_TCO2, UKA_BASE_DATE,
+    UKA_PROXY_TICKER) so the anchor can be retuned if a clean UKA spot source
+    becomes available later without changing the SQL views or notebooks.
+
+    Caveats for interview / production:
+        - KRBN isn't a pure EUA tracker; it has CCA / RGGI / UKA weights.
+        - The £/tCO2 scaling is a basis assumption, not a true UKA print.
+        - Production path: ICE UKA direct (paid), or scrape EEX EUA daily
+          settlement CSV (free, fragile), or Sandbag/Carbon Pulse feeds.
+        - This is exactly the proxy that allows the implied-gas check to keep
+          working without a paid carbon-data subscription.
+    """
+    px = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+    if px.empty:
+        raise RuntimeError(
+            f"{ticker} fetch returned empty; check yfinance status or try a fallback ticker."
+        )
+    out = px[["Close"]].reset_index()
+    out.columns = ["price_date", "krbn_close"]
+    out["price_date"] = pd.to_datetime(out["price_date"]).dt.date
+
+    base_dt = pd.to_datetime(base_date).date()
+    available = out[out["price_date"] >= base_dt]
+    if available.empty:
+        raise RuntimeError(
+            f"no {ticker} prints on or after base_date={base_dt}; window misalignment."
+        )
+    anchor_krbn = float(available["krbn_close"].iloc[0])
+    out["uka_proxy_gbp"] = (
+        base_price_gbp_per_tco2 * (out["krbn_close"] / anchor_krbn)
+    ).round(3)
+    out["source"] = ticker
+    return out[["price_date", "krbn_close", "uka_proxy_gbp", "source"]]
+
+
 def fetch_gb_power(start="2026-01-01", end="2026-05-31", *, chunk_days=7, provider="APXMIDP"):
     """GB day-ahead market-index half-hourly prices, resampled to daily mean (£/MWh).
 
@@ -131,7 +192,8 @@ def fetch_gb_power(start="2026-01-01", end="2026-05-31", *, chunk_days=7, provid
     and (b) caps each request to ~a week, so we chunk and concatenate.
 
     Provider defaults to APXMIDP — N2EXMIDP submissions are sparse on the project
-    dates (one non-zero period per day on average); APX populates all 48.
+    dates (one non-zero period per day on average); APX populates all 48. See
+    docs/21_data_sources.md for the coverage diagnostic.
     """
     url = "https://data.elexon.co.uk/bmrs/api/v1/balancing/pricing/market-index"
     start_dt = pd.to_datetime(start)

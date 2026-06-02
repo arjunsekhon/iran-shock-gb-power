@@ -1,0 +1,9 @@
+code,name,dictionary,polarity,note
+c2.1,LIWC anger,LIWC2007,negative,Words conveying anger/hostility
+c2.21,LIWC anxiety,LIWC2007,negative,Words conveying anxiety/worry
+c2.6,LIWC certainty,LIWC2007,neutral,Words conveying confidence/certainty
+c2.34,LIWC negate,LIWC2007,negative,Negation words (no/not/never)
+c3.2,General Inquirer hostile,GI,negative,Hostile / conflict framing
+c3.3,General Inquirer power,GI,neutral,Power / authority framing
+v10.1.1,WordNetAffect fear,WNA,negative,Fear / dread emotion
+v10.1.5,WordNetAffect surprise,WNA,neutral,Surprise / shock emotion
