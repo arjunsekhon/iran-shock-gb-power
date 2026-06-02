@@ -2,6 +2,11 @@
 -- Statements run ONE AT A TIME, in this (dependency) order.
 -- Swaps from DuckDB: strptime(...)::DATE -> CAST(date_parse(...) AS DATE);
 --   col::TYPE -> CAST(col AS TYPE); + INTERVAL N DAY -> date_add('day', N, ...).
+-- Numeric casts on raw gdelt use TRY_CAST: Athena's TSV SerDe reads empty fields
+--   as '' (DuckDB reads them as NULL), and CAST('' AS DOUBLE) errors; TRY_CAST
+--   returns NULL instead, matching DuckDB and ignored by avg/sum.
+-- v_event_impact_multi uses LEFT JOINs rather than the scalar-subquery select list
+--   from the DuckDB version: same result, parses cleanly in Trino/Athena.
 
 -- 1. price/gen-mix passthroughs (no swaps needed)
 CREATE OR REPLACE VIEW v_brent_daily AS SELECT * FROM brent ORDER BY price_date;
@@ -16,9 +21,9 @@ CREATE OR REPLACE VIEW v_gb_gen_mix_daily AS SELECT * FROM gb_gen_mix ORDER BY p
 CREATE OR REPLACE VIEW v_middle_east_events AS
 SELECT CAST(date_parse(day,'%Y%m%d') AS DATE) AS event_date,
        count(*) AS event_count,
-       avg(CAST(avgtone AS DOUBLE)) AS avg_tone,
-       avg(CAST(goldsteinscale AS DOUBLE)) AS avg_goldstein,
-       sum(CAST(nummentions AS INTEGER)) AS total_mentions
+       avg(TRY_CAST(avgtone AS DOUBLE)) AS avg_tone,
+       avg(TRY_CAST(goldsteinscale AS DOUBLE)) AS avg_goldstein,
+       sum(TRY_CAST(nummentions AS INTEGER)) AS total_mentions
 FROM gdelt
 WHERE actiongeo_countrycode IN ('IR','IS','US','SA','AE','QA','IZ','KU','BA','LE','SY','YM')
   AND quadclass IN ('3','4')
@@ -29,11 +34,11 @@ GROUP BY 1 ORDER BY 1;
 CREATE OR REPLACE VIEW v_event_geo AS
 SELECT actiongeo_fullname AS place,
        actiongeo_countrycode AS fips_country,
-       round(CAST(actiongeo_lat AS DOUBLE), 1) AS lat,
-       round(CAST(actiongeo_long AS DOUBLE), 1) AS lon,
+       round(TRY_CAST(actiongeo_lat AS DOUBLE), 1) AS lat,
+       round(TRY_CAST(actiongeo_long AS DOUBLE), 1) AS lon,
        count(*) AS event_count,
-       avg(CAST(avgtone AS DOUBLE)) AS avg_tone,
-       sum(CAST(nummentions AS INTEGER)) AS total_mentions
+       avg(TRY_CAST(avgtone AS DOUBLE)) AS avg_tone,
+       sum(TRY_CAST(nummentions AS INTEGER)) AS total_mentions
 FROM gdelt
 WHERE quadclass IN ('3','4')
   AND actiongeo_type IN ('3','4')
@@ -80,7 +85,7 @@ SELECT event_date, label,
 FROM e
 ORDER BY event_date;
 
--- 6. multi-horizon event impact (t+1, t+3, t+5, t+10)
+-- 6. multi-horizon event impact (t+1, t+3, t+5, t+10) -- JOIN form (Trino-friendly)
 CREATE OR REPLACE VIEW v_event_impact_multi AS
 WITH anchored AS (
     SELECT t.event_date, t.label,
@@ -90,41 +95,37 @@ WITH anchored AS (
            (SELECT MIN(price_date) FROM v_brent_daily WHERE price_date >= date_add('day',5,t.event_date))  AS t5,
            (SELECT MIN(price_date) FROM v_brent_daily WHERE price_date >= date_add('day',10,t.event_date)) AS t10
     FROM timeline t
-),
-prices AS (
-    SELECT a.event_date, a.label,
-           (SELECT brent_close   FROM v_brent_daily    WHERE price_date = a.t0)  AS b0,
-           (SELECT brent_close   FROM v_brent_daily    WHERE price_date = a.t1)  AS b1,
-           (SELECT brent_close   FROM v_brent_daily    WHERE price_date = a.t3)  AS b3,
-           (SELECT brent_close   FROM v_brent_daily    WHERE price_date = a.t5)  AS b5,
-           (SELECT brent_close   FROM v_brent_daily    WHERE price_date = a.t10) AS b10,
-           (SELECT ttf_close     FROM v_ttf_daily      WHERE price_date = a.t0)  AS g0,
-           (SELECT ttf_close     FROM v_ttf_daily      WHERE price_date = a.t1)  AS g1,
-           (SELECT ttf_close     FROM v_ttf_daily      WHERE price_date = a.t3)  AS g3,
-           (SELECT ttf_close     FROM v_ttf_daily      WHERE price_date = a.t5)  AS g5,
-           (SELECT ttf_close     FROM v_ttf_daily      WHERE price_date = a.t10) AS g10,
-           (SELECT gb_power_avg  FROM v_gb_power_daily WHERE price_date = a.t0)  AS p0,
-           (SELECT gb_power_avg  FROM v_gb_power_daily WHERE price_date = a.t1)  AS p1,
-           (SELECT gb_power_avg  FROM v_gb_power_daily WHERE price_date = a.t3)  AS p3,
-           (SELECT gb_power_avg  FROM v_gb_power_daily WHERE price_date = a.t5)  AS p5,
-           (SELECT gb_power_avg  FROM v_gb_power_daily WHERE price_date = a.t10) AS p10
-    FROM anchored a
 )
-SELECT event_date, label,
-       round(100.0*(b1 -b0)/b0, 1) AS brent_pct_1d,
-       round(100.0*(b3 -b0)/b0, 1) AS brent_pct_3d,
-       round(100.0*(b5 -b0)/b0, 1) AS brent_pct_5d,
-       round(100.0*(b10-b0)/b0, 1) AS brent_pct_10d,
-       round(100.0*(g1 -g0)/g0, 1) AS ttf_pct_1d,
-       round(100.0*(g3 -g0)/g0, 1) AS ttf_pct_3d,
-       round(100.0*(g5 -g0)/g0, 1) AS ttf_pct_5d,
-       round(100.0*(g10-g0)/g0, 1) AS ttf_pct_10d,
-       round(100.0*(p1 -p0)/p0, 1) AS power_pct_1d,
-       round(100.0*(p3 -p0)/p0, 1) AS power_pct_3d,
-       round(100.0*(p5 -p0)/p0, 1) AS power_pct_5d,
-       round(100.0*(p10-p0)/p0, 1) AS power_pct_10d
-FROM prices
-ORDER BY event_date;
+SELECT a.event_date, a.label,
+       round(100.0*(b1.brent_close-b0.brent_close)/b0.brent_close, 1)   AS brent_pct_1d,
+       round(100.0*(b3.brent_close-b0.brent_close)/b0.brent_close, 1)   AS brent_pct_3d,
+       round(100.0*(b5.brent_close-b0.brent_close)/b0.brent_close, 1)   AS brent_pct_5d,
+       round(100.0*(b10.brent_close-b0.brent_close)/b0.brent_close, 1)  AS brent_pct_10d,
+       round(100.0*(g1.ttf_close-g0.ttf_close)/g0.ttf_close, 1)         AS ttf_pct_1d,
+       round(100.0*(g3.ttf_close-g0.ttf_close)/g0.ttf_close, 1)         AS ttf_pct_3d,
+       round(100.0*(g5.ttf_close-g0.ttf_close)/g0.ttf_close, 1)         AS ttf_pct_5d,
+       round(100.0*(g10.ttf_close-g0.ttf_close)/g0.ttf_close, 1)        AS ttf_pct_10d,
+       round(100.0*(p1.gb_power_avg-p0.gb_power_avg)/p0.gb_power_avg, 1)   AS power_pct_1d,
+       round(100.0*(p3.gb_power_avg-p0.gb_power_avg)/p0.gb_power_avg, 1)   AS power_pct_3d,
+       round(100.0*(p5.gb_power_avg-p0.gb_power_avg)/p0.gb_power_avg, 1)   AS power_pct_5d,
+       round(100.0*(p10.gb_power_avg-p0.gb_power_avg)/p0.gb_power_avg, 1)  AS power_pct_10d
+FROM anchored a
+LEFT JOIN v_brent_daily    b0  ON b0.price_date  = a.t0
+LEFT JOIN v_brent_daily    b1  ON b1.price_date  = a.t1
+LEFT JOIN v_brent_daily    b3  ON b3.price_date  = a.t3
+LEFT JOIN v_brent_daily    b5  ON b5.price_date  = a.t5
+LEFT JOIN v_brent_daily    b10 ON b10.price_date = a.t10
+LEFT JOIN v_ttf_daily      g0  ON g0.price_date  = a.t0
+LEFT JOIN v_ttf_daily      g1  ON g1.price_date  = a.t1
+LEFT JOIN v_ttf_daily      g3  ON g3.price_date  = a.t3
+LEFT JOIN v_ttf_daily      g5  ON g5.price_date  = a.t5
+LEFT JOIN v_ttf_daily      g10 ON g10.price_date = a.t10
+LEFT JOIN v_gb_power_daily p0  ON p0.price_date  = a.t0
+LEFT JOIN v_gb_power_daily p1  ON p1.price_date  = a.t1
+LEFT JOIN v_gb_power_daily p3  ON p3.price_date  = a.t3
+LEFT JOIN v_gb_power_daily p5  ON p5.price_date  = a.t5
+LEFT JOIN v_gb_power_daily p10 ON p10.price_date = a.t10
+ORDER BY a.event_date;
 
 -- 7. conditional-transmission test: event impact tagged by gas-share regime
 CREATE OR REPLACE VIEW v_event_impact_regime AS

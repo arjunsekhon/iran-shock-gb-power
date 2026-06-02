@@ -219,7 +219,7 @@ def build() -> int:
     Run after `iran-shock-ingest-prices` and `iran-shock-ingest-gdelt`. Reads from
     data/epic_fury_timeline.csv, data/raw/prices/*.csv, and data/raw/gdelt/**/*.export.CSV;
     executes each sql/v_*.sql file in dependency order; produces a populated
-    DuckDB at config.DUCKDB_PATH with 7 tables and 16 views.
+    DuckDB at config.DUCKDB_PATH with 9 tables and 24 views.
     """
     log_path = Path("logs/build.log")
     _configure_logging(log_path)
@@ -308,6 +308,7 @@ def build() -> int:
         "v_gdelt_gkg_themes_daily.sql",  # energy/maritime/conflict theme counts
         "v_gdelt_gkg_hormuz_daily.sql",  # Hormuz / Persian Gulf / Kharg / Ras Laffan mentions
         "v_gdelt_gkg_gcam_daily.sql",  # cherry-picked GCAM emotion dimensions
+        "v_lng_vs_oil_signal_daily.sql",  # LNG-themed vs oil-themed news signal volumes
     ]
     has_gkg = (
         con.execute(
@@ -385,6 +386,7 @@ def build() -> int:
             "v_gdelt_gkg_themes_daily",
             "v_gdelt_gkg_hormuz_daily",
             "v_gdelt_gkg_gcam_daily",
+            "v_lng_vs_oil_signal_daily",
         ]
         if has_gkg
         else []
