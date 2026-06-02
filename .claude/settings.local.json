@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:bmrs.elexon.co.uk)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:data.elexon.co.uk)",
+      "Bash(python3 *)",
+      "Bash(uv sync *)",
+      "Bash(uv run *)",
+      "Bash(uv add *)",
+      "WebFetch(domain:osuked.github.io)"
+    ]
+  }
+}

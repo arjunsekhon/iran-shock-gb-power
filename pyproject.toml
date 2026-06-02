@@ -1,0 +1,75 @@
+[project]
+name = "iran-shock"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Arjun Sekhon", email = "arjunsekhon2@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.3",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.9",
+    "pandas>=3.0.3",
+    "plotly>=6.7.0",
+    "requests>=2.34.2",
+    "scipy>=1.17.1",
+    "torch>=2.12.0",
+    "tqdm>=4.67.3",
+    "transformers>=5.9.0",
+    "yfinance>=1.4.0",
+]
+
+[project.scripts]
+iran-shock = "iran_shock:main"
+iran-shock-ingest-gdelt = "iran_shock.cli:ingest_gdelt"
+iran-shock-ingest-gdelt-gkg = "iran_shock.cli:ingest_gdelt_gkg"
+iran-shock-ingest-prices = "iran_shock.cli:ingest_prices"
+iran-shock-score-finbert = "iran_shock.cli:score_finbert"
+iran-shock-build = "iran_shock.cli:build"
+
+[build-system]
+requires = ["uv_build>=0.9.13,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.14",
+]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+junit_family = "xunit2"
+addopts = "--junitxml=test-results.xml"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+exclude = [".venv", "build", "dist", "migrations"]
+fix = true
+show-fixes = true
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "I", "B", "W",    # basic linting & style (I = isort)
+  "UP",                       # upgrade Python syntax
+  "N",                        # pep8-naming
+  "SIM",                      # simplify
+  "C4",                       # comprehensions
+  "TID",                      # tidy imports
+]
+ignore = [
+  "E501",  # line length (handled by the formatter)
+  "W292",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["iran_shock"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

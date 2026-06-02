@@ -1,0 +1,20 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# DuckDB
+*.duckdb
+*.duckdb.wal
+
+# Project artefacts
+data/raw/
+logs/
+*.zip
+docs/
